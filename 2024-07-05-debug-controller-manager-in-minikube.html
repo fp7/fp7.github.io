@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="generator" content="Asciidoctor 2.0.23">
+<title>Debugging the kube-controller-manager inside minikube</title>
+  <link rel="stylesheet" crossorigin href="/assets/main-DQKlRAm7.css">
+</head>
+<body class="article">
+<nav>
+  <a href="index.html">Blog</a>
+</nav>
+<div id="content">
+<div class="sect1">
+<h2 id="_debugging_the_kube_controller_manager_inside_minikube">Debugging the kube-controller-manager inside minikube</h2>
+<div class="sectionbody">
+<div class="paragraph">
+<p>Recently I wanted to understand some of the internals of kubernetes.
+I like to do this with a debugger session so that I don&#8217;t have to guess whats happening solely from reading the code but
+also see what&#8217;s going on when it is running with the capabilities to inspect the running system.</p>
+</div>
+<div class="sect2">
+<h3 id="_setup_environment">Setup environment</h3>
+<div class="paragraph">
+<p>I needed a running cluster inside minikube and the source code of kubernetes.</p>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre class="highlight"><code class="language-bash" data-lang="bash">minikube start</code></pre>
+</div>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre class="highlight"><code>* minikube v1.33.1 on Arch
+  - MINIKUBE_ROOTLESS=true
+* Using the kvm2 driver based on user configuration
+* Starting "minikube" primary control-plane node in "minikube" cluster
+* Creating kvm2 VM (CPUs=2, Memory=6000MB, Disk=20000MB) ...
+* Preparing Kubernetes v1.30.0 on Docker 26.0.2 ... <b class="conum">(1)</b>
+  - Generating certificates and keys ...
+  - Booting up control plane ...
+  - Configuring RBAC rules ...
+* Configuring bridge CNI (Container Networking Interface) ...
+* Verifying Kubernetes components...
+  - Using image gcr.io/k8s-minikube/storage-provisioner:v5
+* Enabled addons: storage-provisioner, default-storageclass
+* Done! kubectl is now configured to use "minikube" cluster and "default" namespace by default</code></pre>
+</div>
+</div>
+<div class="colist arabic">
+<ol>
+<li>
+<p>In the output we see that minikube uses k8s in version 1.30.0, which I then used
+to checkout the same minor version of the kubernetes source code.</p>
+</li>
+</ol>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre class="highlight"><code class="language-bash" data-lang="bash">git clone --depth=1 --branch=v1.30.2 https://github.com/kubernetes/kubernetes
+cd kubernetes</code></pre>
+</div>
+</div>
+<div class="paragraph">
+<p>I wanted to debug the <code>kube-controller-manager</code> which is running in its own pod.</p>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre class="highlight"><code class="language-bash" data-lang="bash">kubectl -n kube-system get  pods</code></pre>
+</div>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre class="highlight"><code>NAME                               READY   STATUS    RESTARTS        AGE
+kube-controller-manager-minikube   1/1     Running   0               3m22s</code></pre>
+</div>
+</div>
+<div class="paragraph">
+<p>The kube-controller-manager is a <a href="https://kubernetes.io/docs/tasks/configure-pod-container/static-pod/">static pod</a>.
+So <code>kubectl edit</code> or <code>kubectl debug</code> can not be used with it and I needed to configure it by editing the manifest in the filesystem of the Node.
+The relevant file is <code>/etc/kubernetes/manifests/kube-controller-manager.yaml</code> and it can be reached with <code>minikube ssh</code>.</p>
+</div>
+</div>
+<div class="sect2">
+<h3 id="_build_kubernetes_with_debug">Build kubernetes with debug</h3>
+<div class="paragraph">
+<p>The production images of kubernetes are not compiled with the necessary flags to debug it with <a href="https://github.com/go-delve/delve">Delve</a>
+and they are also very minimal in general. Not even a shell is included. So we need to build the images with debugging info compiled in and with all the necessary libs to run Delve. After some digging in the shell scripts that are used to build kubernetes I found the correct env variables.</p>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre class="highlight"><code>KUBE_FASTBUILD=true &#92;<b class="conum">(1)</b>
+KUBE_CONTROLLER_MANAGER_BASE_IMAGE="docker.io/golang:latest" &#92;<b class="conum">(2)</b>
+DBG=1 &#92;<b class="conum">(3)</b>
+./build/release-images.sh</code></pre>
+</div>
+</div>
+<div class="colist arabic">
+<ol>
+<li>
+<p>Makes the build only produce the images with the architecture of the host machine.</p>
+</li>
+<li>
+<p>Defines the base image for the kube-controller-manager. In the golang image is everything to run Delve.</p>
+</li>
+<li>
+<p>Makes the build compile the go code with debugging information.</p>
+</li>
+</ol>
+</div>
+<div class="paragraph">
+<p>After the compilation is done there is a file <code>_output/release-images/amd64/kube-controller-manager.tar</code> which is the exported container image.
+It can be imported into minikube with <code>minikube image load _output/release-images/amd64/kube-controller-manager.tar</code></p>
+</div>
+<div class="paragraph">
+<p>After the import the presence of the image can be checked</p>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre class="highlight"><code>minikube ssh docker images
+REPOSITORY                                      TAG             IMAGE ID       CREATED          SIZE
+registry.k8s.io/kube-controller-manager-amd64   v1.30.2         4a83afa751ed   38 seconds ago   986MB
+registry.k8s.io/kube-controller-manager         v1.30.0         c7aad43836fa   2 months ago     111MB</code></pre>
+</div>
+</div>
+<div class="paragraph">
+<p>The imported image is named differently and also has a different patch level then the original. But that
+does not matter as we change the pod spec next and just configure it to use the new image.</p>
+</div>
+</div>
+<div class="sect2">
+<h3 id="_configure_minikube">Configure minikube</h3>
+<div class="paragraph">
+<p>Next I edited <code>/etc/kubernetes/manifests/kube-controller-manager.yaml</code> in multiple steps and everytime the kubelet automatically picked up the changes and restarted the controller manager with the new configuration. When I broke the configuration I undid the last change, saved the file and the kubelet restarted everything again.</p>
+</div>
+<div class="paragraph">
+<p>To open the editor I used:</p>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre class="highlight"><code class="language-bash" data-lang="bash">minikube ssh
+sudo -s # We need to be root to edit the file.
+vi /etc/kubernetes/manifests/kube-controller-manager.yaml</code></pre>
+</div>
+</div>
+<div class="paragraph">
+<p>The original file contained only one configured container which looked like this
+(I left out a lot of stuff that is irrelevant):</p>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre class="highlight"><code class="language-yaml" data-lang="yaml">- command:
+  - kube-controller-manager
+  - --allocate-node-cidrs=true
+  - --authentication-kubeconfig=/etc/kubernetes/controller-manager.conf
+  - --authorization-kubeconfig=/etc/kubernetes/controller-manager.conf
+  - --bind-address=127.0.0.1
+  - --client-ca-file=/var/lib/minikube/certs/ca.crt
+  - --cluster-cidr=10.244.0.0/16
+  - --cluster-name=mk
+  - --cluster-signing-cert-file=/var/lib/minikube/certs/ca.crt
+  - --cluster-signing-key-file=/var/lib/minikube/certs/ca.key
+  - --controllers=*,bootstrapsigner,tokencleaner
+  - --kubeconfig=/etc/kubernetes/controller-manager.conf
+  - --leader-elect=false
+  - --requestheader-client-ca-file=/var/lib/minikube/certs/front-proxy-ca.crt
+  - --root-ca-file=/var/lib/minikube/certs/ca.crt
+  - --service-account-private-key-file=/var/lib/minikube/certs/sa.key
+  - --service-cluster-ip-range=10.96.0.0/12
+  - --use-service-account-credentials=true
+  image: registry.k8s.io/kube-controller-manager:v1.30.1</code></pre>
+</div>
+</div>
+<div class="paragraph">
+<p>I changed the file in little steps to eventually get to the following version</p>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre class="highlight"><code class="language-yaml" data-lang="yaml">- command: ["sh", "-c"] <b class="conum">(1)</b>
+  args:
+    - | <b class="conum">(2)</b>
+      go install github.com/go-delve/delve/cmd/dlv@latest <b class="conum">(3)</b>
+      exec dlv --listen=:2345 --headless=true --api-version=2 --accept-multiclient exec \ <b class="conum">(4)</b>
+      /usr/local/bin/kube-controller-manager -- \ <b class="conum">(5)</b>
+      --allocate-node-cidrs=true \
+      --authentication-kubeconfig=/etc/kubernetes/controller-manager.conf \
+      --authorization-kubeconfig=/etc/kubernetes/controller-manager.conf \
+      --bind-address=127.0.0.1 \
+      --client-ca-file=/var/lib/minikube/certs/ca.crt \
+      --cluster-cidr=10.244.0.0/16 \
+      --cluster-name=mk \
+      --cluster-signing-cert-file=/var/lib/minikube/certs/ca.crt \
+      --cluster-signing-key-file=/var/lib/minikube/certs/ca.key \
+      --controllers=*,bootstrapsigner,tokencleaner \
+      --kubeconfig=/etc/kubernetes/controller-manager.conf \
+      --leader-elect=false \
+      --requestheader-client-ca-file=/var/lib/minikube/certs/front-proxy-ca.crt \
+      --root-ca-file=/var/lib/minikube/certs/ca.crt \
+      --service-account-private-key-file=/var/lib/minikube/certs/sa.key \
+      --service-cluster-ip-range=10.96.0.0/12 \
+      --use-service-account-credentials=true
+  image: registry.k8s.io/kube-controller-manager-amd64:v1.30.2 <b class="conum">(6)</b></code></pre>
+</div>
+</div>
+<div class="colist arabic">
+<ol>
+<li>
+<p>The args are wrapped in a shell because I wanted to execute two commands instead of one.</p>
+</li>
+<li>
+<p>The args are configured as a string and not as a list of parameters any more.</p>
+</li>
+<li>
+<p>This command installs Delve into the container first.</p>
+</li>
+<li>
+<p>Here Delve is started with the necessary parameters. <code>exec</code> at the beginning is used to replace the shell process.</p>
+</li>
+<li>
+<p>This is the remaining of the original command except that it is not a list any more but a string. Note the <code>\</code> and the end of the lines.
+There is an extra <code>--</code> too. It delimits the parameters of Delve from the parameters of the command to be debugged.</p>
+</li>
+<li>
+<p>This is the changed image version.</p>
+</li>
+</ol>
+</div>
+<div class="paragraph">
+<p>The command <code>kubectl logs -n kube-system kube-controller-manager-minikube</code> showed that Delve started and is waiting for connections.</p>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre>API server listening at: [::]:2345
+2024-07-05T12:32:00Z warning layer=rpc Listening for remote connections (connections are not authenticated nor encrypted)</pre>
+</div>
+</div>
+<div class="paragraph">
+<p>To get to the port I used kubectl to forward to it</p>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre class="highlight"><code>kubectl port-forward -n kube-system kube-controller-manager-minikube 2345</code></pre>
+</div>
+</div>
+</div>
+</div>
+</div>
+<div class="sect1">
+<h2 id="_debug_with_intellij">Debug with intellij</h2>
+<div class="sectionbody">
+<div class="paragraph">
+<p>Afterwards I could connect with the debugger to the port at localhost. I used Intellij with the go plugin for this. But it should
+work with other editors too. This is the Go Remote config to run.</p>
+</div>
+<div class="imageblock">
+<div class="content">
+<img src="/assets/intellij-remote-delve-lUfAsKwb.png" alt="intellij remote delve">
+</div>
+</div>
+<div class="paragraph">
+<p>And finally my breakpoint was hit.</p>
+</div>
+<div class="imageblock">
+<div class="content">
+<img src="/assets/debug-delve-B8s19q4n.png" alt="debug delve">
+</div>
+</div>
+<div class="paragraph date">
+<p>(2024-07-05)</p>
+</div>
+</div>
+</div>
+</div>
+</body>
+</html>
