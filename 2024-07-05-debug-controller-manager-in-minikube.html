@@ -6,7 +6,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="generator" content="Asciidoctor 2.0.23">
 <title>Debugging the kube-controller-manager inside minikube</title>
-  <link rel="stylesheet" crossorigin href="/assets/main-DQKlRAm7.css">
+  <link rel="stylesheet" crossorigin href="/assets/main-1LVIz60p.css">
+  <link rel="stylesheet" crossorigin href="/assets/coderay-asciidoctor-BIrJ8iqu.css">
 </head>
 <body class="article">
 <nav>
@@ -28,15 +29,15 @@ also see what&#8217;s going on when it is running with the capabilities to inspe
 </div>
 <div class="listingblock">
 <div class="content">
-<pre class="highlight"><code class="language-bash" data-lang="bash">minikube start</code></pre>
+<pre class="CodeRay highlight"><code data-lang="console">minikube start</code></pre>
 </div>
 </div>
 <div class="listingblock">
 <div class="content">
-<pre class="highlight"><code>* minikube v1.33.1 on Arch
+<pre class="CodeRay highlight"><code>* minikube v1.33.1 on Arch
   - MINIKUBE_ROOTLESS=true
 * Using the kvm2 driver based on user configuration
-* Starting "minikube" primary control-plane node in "minikube" cluster
+* Starting &quot;minikube&quot; primary control-plane node in &quot;minikube&quot; cluster
 * Creating kvm2 VM (CPUs=2, Memory=6000MB, Disk=20000MB) ...
 * Preparing Kubernetes v1.30.0 on Docker 26.0.2 ... <b class="conum">(1)</b>
   - Generating certificates and keys ...
@@ -46,7 +47,7 @@ also see what&#8217;s going on when it is running with the capabilities to inspe
 * Verifying Kubernetes components...
   - Using image gcr.io/k8s-minikube/storage-provisioner:v5
 * Enabled addons: storage-provisioner, default-storageclass
-* Done! kubectl is now configured to use "minikube" cluster and "default" namespace by default</code></pre>
+* Done! kubectl is now configured to use &quot;minikube&quot; cluster and &quot;default&quot; namespace by default</code></pre>
 </div>
 </div>
 <div class="colist arabic">
@@ -59,7 +60,7 @@ to checkout the same minor version of the kubernetes source code.</p>
 </div>
 <div class="listingblock">
 <div class="content">
-<pre class="highlight"><code class="language-bash" data-lang="bash">git clone --depth=1 --branch=v1.30.2 https://github.com/kubernetes/kubernetes
+<pre class="CodeRay highlight"><code data-lang="console">git clone --depth=1 --branch=v1.30.2 https://github.com/kubernetes/kubernetes
 cd kubernetes</code></pre>
 </div>
 </div>
@@ -68,12 +69,12 @@ cd kubernetes</code></pre>
 </div>
 <div class="listingblock">
 <div class="content">
-<pre class="highlight"><code class="language-bash" data-lang="bash">kubectl -n kube-system get  pods</code></pre>
+<pre class="CodeRay highlight"><code data-lang="console">kubectl -n kube-system get  pods</code></pre>
 </div>
 </div>
 <div class="listingblock">
 <div class="content">
-<pre class="highlight"><code>NAME                               READY   STATUS    RESTARTS        AGE
+<pre class="CodeRay highlight"><code>NAME                               READY   STATUS    RESTARTS        AGE
 kube-controller-manager-minikube   1/1     Running   0               3m22s</code></pre>
 </div>
 </div>
@@ -91,8 +92,8 @@ and they are also very minimal in general. Not even a shell is included. So we n
 </div>
 <div class="listingblock">
 <div class="content">
-<pre class="highlight"><code>KUBE_FASTBUILD=true &#92;<b class="conum">(1)</b>
-KUBE_CONTROLLER_MANAGER_BASE_IMAGE="docker.io/golang:latest" &#92;<b class="conum">(2)</b>
+<pre class="CodeRay highlight"><code>KUBE_FASTBUILD=true &#92;<b class="conum">(1)</b>
+KUBE_CONTROLLER_MANAGER_BASE_IMAGE=&quot;docker.io/golang:latest&quot; &#92;<b class="conum">(2)</b>
 DBG=1 &#92;<b class="conum">(3)</b>
 ./build/release-images.sh</code></pre>
 </div>
@@ -119,7 +120,7 @@ It can be imported into minikube with <code>minikube image load _output/release-
 </div>
 <div class="listingblock">
 <div class="content">
-<pre class="highlight"><code>minikube ssh docker images
+<pre class="CodeRay highlight"><code>minikube ssh docker images
 REPOSITORY                                      TAG             IMAGE ID       CREATED          SIZE
 registry.k8s.io/kube-controller-manager-amd64   v1.30.2         4a83afa751ed   38 seconds ago   986MB
 registry.k8s.io/kube-controller-manager         v1.30.0         c7aad43836fa   2 months ago     111MB</code></pre>
@@ -140,7 +141,7 @@ does not matter as we change the pod spec next and just configure it to use the 
 </div>
 <div class="listingblock">
 <div class="content">
-<pre class="highlight"><code class="language-bash" data-lang="bash">minikube ssh
+<pre class="CodeRay highlight"><code data-lang="console">minikube ssh
 sudo -s # We need to be root to edit the file.
 vi /etc/kubernetes/manifests/kube-controller-manager.yaml</code></pre>
 </div>
@@ -151,26 +152,26 @@ vi /etc/kubernetes/manifests/kube-controller-manager.yaml</code></pre>
 </div>
 <div class="listingblock">
 <div class="content">
-<pre class="highlight"><code class="language-yaml" data-lang="yaml">- command:
-  - kube-controller-manager
-  - --allocate-node-cidrs=true
-  - --authentication-kubeconfig=/etc/kubernetes/controller-manager.conf
-  - --authorization-kubeconfig=/etc/kubernetes/controller-manager.conf
-  - --bind-address=127.0.0.1
-  - --client-ca-file=/var/lib/minikube/certs/ca.crt
-  - --cluster-cidr=10.244.0.0/16
-  - --cluster-name=mk
-  - --cluster-signing-cert-file=/var/lib/minikube/certs/ca.crt
-  - --cluster-signing-key-file=/var/lib/minikube/certs/ca.key
-  - --controllers=*,bootstrapsigner,tokencleaner
-  - --kubeconfig=/etc/kubernetes/controller-manager.conf
-  - --leader-elect=false
-  - --requestheader-client-ca-file=/var/lib/minikube/certs/front-proxy-ca.crt
-  - --root-ca-file=/var/lib/minikube/certs/ca.crt
-  - --service-account-private-key-file=/var/lib/minikube/certs/sa.key
-  - --service-cluster-ip-range=10.96.0.0/12
-  - --use-service-account-credentials=true
-  image: registry.k8s.io/kube-controller-manager:v1.30.1</code></pre>
+<pre class="CodeRay highlight"><code data-lang="yaml">- <span class="string"><span class="content">command:</span></span>
+  - <span class="string"><span class="content">kube-controller-manager</span></span>
+  - <span class="string"><span class="content">--allocate-node-cidrs=true</span></span>
+  - <span class="string"><span class="content">--authentication-kubeconfig=/etc/kubernetes/controller-manager.conf</span></span>
+  - <span class="string"><span class="content">--authorization-kubeconfig=/etc/kubernetes/controller-manager.conf</span></span>
+  - <span class="string"><span class="content">--bind-address=127.0.0.1</span></span>
+  - <span class="string"><span class="content">--client-ca-file=/var/lib/minikube/certs/ca.crt</span></span>
+  - <span class="string"><span class="content">--cluster-cidr=10.244.0.0/16</span></span>
+  - <span class="string"><span class="content">--cluster-name=mk</span></span>
+  - <span class="string"><span class="content">--cluster-signing-cert-file=/var/lib/minikube/certs/ca.crt</span></span>
+  - <span class="string"><span class="content">--cluster-signing-key-file=/var/lib/minikube/certs/ca.key</span></span>
+  - <span class="string"><span class="content">--controllers=*,bootstrapsigner,tokencleaner</span></span>
+  - <span class="string"><span class="content">--kubeconfig=/etc/kubernetes/controller-manager.conf</span></span>
+  - <span class="string"><span class="content">--leader-elect=false</span></span>
+  - <span class="string"><span class="content">--requestheader-client-ca-file=/var/lib/minikube/certs/front-proxy-ca.crt</span></span>
+  - <span class="string"><span class="content">--root-ca-file=/var/lib/minikube/certs/ca.crt</span></span>
+  - <span class="string"><span class="content">--service-account-private-key-file=/var/lib/minikube/certs/sa.key</span></span>
+  - <span class="string"><span class="content">--service-cluster-ip-range=10.96.0.0/12</span></span>
+  - <span class="string"><span class="content">--use-service-account-credentials=true</span></span>
+  <span class="key">image</span>: <span class="string"><span class="content">registry.k8s.io/kube-controller-manager:v1.30.1</span></span></code></pre>
 </div>
 </div>
 <div class="paragraph">
@@ -178,30 +179,30 @@ vi /etc/kubernetes/manifests/kube-controller-manager.yaml</code></pre>
 </div>
 <div class="listingblock">
 <div class="content">
-<pre class="highlight"><code class="language-yaml" data-lang="yaml">- command: ["sh", "-c"] <b class="conum">(1)</b>
-  args:
-    - | <b class="conum">(2)</b>
-      go install github.com/go-delve/delve/cmd/dlv@latest <b class="conum">(3)</b>
-      exec dlv --listen=:2345 --headless=true --api-version=2 --accept-multiclient exec \ <b class="conum">(4)</b>
-      /usr/local/bin/kube-controller-manager -- \ <b class="conum">(5)</b>
-      --allocate-node-cidrs=true \
-      --authentication-kubeconfig=/etc/kubernetes/controller-manager.conf \
-      --authorization-kubeconfig=/etc/kubernetes/controller-manager.conf \
-      --bind-address=127.0.0.1 \
-      --client-ca-file=/var/lib/minikube/certs/ca.crt \
-      --cluster-cidr=10.244.0.0/16 \
-      --cluster-name=mk \
-      --cluster-signing-cert-file=/var/lib/minikube/certs/ca.crt \
-      --cluster-signing-key-file=/var/lib/minikube/certs/ca.key \
-      --controllers=*,bootstrapsigner,tokencleaner \
-      --kubeconfig=/etc/kubernetes/controller-manager.conf \
-      --leader-elect=false \
-      --requestheader-client-ca-file=/var/lib/minikube/certs/front-proxy-ca.crt \
-      --root-ca-file=/var/lib/minikube/certs/ca.crt \
-      --service-account-private-key-file=/var/lib/minikube/certs/sa.key \
-      --service-cluster-ip-range=10.96.0.0/12 \
-      --use-service-account-credentials=true
-  image: registry.k8s.io/kube-controller-manager-amd64:v1.30.2 <b class="conum">(6)</b></code></pre>
+<pre class="CodeRay highlight"><code data-lang="yaml">- <span class="string"><span class="content">command: [&quot;sh&quot;, &quot;-c&quot;] </span></span><b class="conum">(1)</b>
+  <span class="key">args</span>:
+    - <span class="string"><span class="delimiter">|</span></span> <b class="conum">(2)</b>
+      <span class="error">go install github.com/go-delve/delve/cmd/dlv@latest </span><b class="conum">(3)</b>
+      <span class="error">exec dlv --listen=:2345 --headless=true --api-version=2 --accept-multiclient exec \ </span><b class="conum">(4)</b>
+      <span class="error">/usr/local/bin/kube-controller-manager -- \ </span><b class="conum">(5)</b>
+      <span class="error">--allocate-node-cidrs=true \</span>
+      <span class="error">--authentication-kubeconfig=/etc/kubernetes/controller-manager.conf \</span>
+      <span class="error">--authorization-kubeconfig=/etc/kubernetes/controller-manager.conf \</span>
+      <span class="error">--bind-address=127.0.0.1 \</span>
+      <span class="error">--client-ca-file=/var/lib/minikube/certs/ca.crt \</span>
+      <span class="error">--cluster-cidr=10.244.0.0/16 \</span>
+      <span class="error">--cluster-name=mk \</span>
+      <span class="error">--cluster-signing-cert-file=/var/lib/minikube/certs/ca.crt \</span>
+      <span class="error">--cluster-signing-key-file=/var/lib/minikube/certs/ca.key \</span>
+      <span class="error">--controllers=*,bootstrapsigner,tokencleaner \</span>
+      <span class="error">--kubeconfig=/etc/kubernetes/controller-manager.conf \</span>
+      <span class="error">--leader-elect=false \</span>
+      <span class="error">--requestheader-client-ca-file=/var/lib/minikube/certs/front-proxy-ca.crt \</span>
+      <span class="error">--root-ca-file=/var/lib/minikube/certs/ca.crt \</span>
+      <span class="error">--service-account-private-key-file=/var/lib/minikube/certs/sa.key \</span>
+      <span class="error">--service-cluster-ip-range=10.96.0.0/12 \</span>
+      <span class="error">--use-service-account-credentials=true</span>
+  <span class="key">image</span>: <span class="string"><span class="content">registry.k8s.io/kube-controller-manager-amd64:v1.30.2 </span></span><b class="conum">(6)</b></code></pre>
 </div>
 </div>
 <div class="colist arabic">
@@ -241,7 +242,7 @@ There is an extra <code>--</code> too. It delimits the parameters of Delve from 
 </div>
 <div class="listingblock">
 <div class="content">
-<pre class="highlight"><code>kubectl port-forward -n kube-system kube-controller-manager-minikube 2345</code></pre>
+<pre class="CodeRay highlight"><code>kubectl port-forward -n kube-system kube-controller-manager-minikube 2345</code></pre>
 </div>
 </div>
 </div>
