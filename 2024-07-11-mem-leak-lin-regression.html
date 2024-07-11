@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="generator" content="Asciidoctor 2.0.23">
+<title>Finding a java app memory leak with linear regression</title>
+  <link rel="stylesheet" crossorigin href="/assets/main-DgLiSTDo.css">
+  <link rel="stylesheet" crossorigin href="/assets/coderay-asciidoctor-BIrJ8iqu.css">
+</head>
+<body class="article">
+<nav>
+  <a href="index.html">Blog</a>
+</nav>
+<div id="content">
+<div class="sect1">
+<h2 id="_finding_a_java_app_memory_leak_with_linear_regression">Finding a java app memory leak with linear regression</h2>
+<div class="sectionbody">
+<div class="paragraph">
+<p>In 2023 I was tasked with analyzing a production issue, where the memory usage of an application would rise indefinitely until the
+performance degraded and the server crashed or had to be restarted.</p>
+</div>
+<div class="sect2">
+<h3 id="_example_app_with_a_memory_leak">Example app with a memory leak</h3>
+<div class="paragraph">
+<p>Based on my findings back then I can now distill a spring boot application which has the very same memory leak.
+And even though this is the only java file it is not obvious where the memory leak is.
+Do you find it by just reading the code?</p>
+</div>
+<div class="paragraph">
+<p>(The session timeout is set to 60 seconds.
+Otherwise the app would run out of memory only because of the retained sessions during the short run time of the experiment.)</p>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre class="CodeRay highlight"><code data-lang="java"><span class="keyword">package</span> <span class="namespace">io.github.fp7</span>;
+
+<span class="keyword">import</span> <span class="include">org.springframework.boot.SpringApplication</span>;
+<span class="keyword">import</span> <span class="include">org.springframework.boot.autoconfigure.SpringBootApplication</span>;
+<span class="keyword">import</span> <span class="include">org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean</span>;
+<span class="keyword">import</span> <span class="include">org.springframework.context.annotation.Bean</span>;
+<span class="keyword">import</span> <span class="include">org.springframework.context.annotation.Configuration</span>;
+<span class="keyword">import</span> <span class="include">org.springframework.security.config.Customizer</span>;
+<span class="keyword">import</span> <span class="include">org.springframework.security.config.annotation.web.builders.HttpSecurity</span>;
+<span class="keyword">import</span> <span class="include">org.springframework.security.core.userdetails.User</span>;
+<span class="keyword">import</span> <span class="include">org.springframework.security.core.userdetails.UserDetailsService</span>;
+<span class="keyword">import</span> <span class="include">org.springframework.security.provisioning.InMemoryUserDetailsManager</span>;
+<span class="keyword">import</span> <span class="include">org.springframework.security.web.SecurityFilterChain</span>;
+<span class="keyword">import</span> <span class="include">org.springframework.stereotype.Controller</span>;
+<span class="keyword">import</span> <span class="include">org.springframework.web.bind.annotation.RequestMapping</span>;
+<span class="keyword">import</span> <span class="include">org.springframework.web.bind.annotation.ResponseBody</span>;
+
+<span class="annotation">@SpringBootApplication</span>
+<span class="annotation">@Controller</span>
+<span class="directive">public</span> <span class="type">class</span> <span class="class">MemLeakExample</span> {
+
+  <span class="directive">public</span> <span class="directive">static</span> <span class="type">void</span> main(<span class="predefined-type">String</span><span class="type">[]</span> args) {
+    SpringApplication.run(MemLeakExample.class,
+      <span class="string"><span class="delimiter">&quot;</span><span class="content">--server.servlet.session.timeout=60s</span><span class="delimiter">&quot;</span></span>);
+  }
+
+  <span class="annotation">@RequestMapping</span>(path = <span class="string"><span class="delimiter">&quot;</span><span class="content">/hello</span><span class="delimiter">&quot;</span></span>)
+  <span class="annotation">@ResponseBody</span>
+  <span class="directive">public</span> <span class="predefined-type">String</span> hello() {
+    <span class="keyword">return</span> <span class="string"><span class="delimiter">&quot;</span><span class="content">world</span><span class="char">\n</span><span class="delimiter">&quot;</span></span>;
+  }
+
+  <span class="annotation">@Configuration</span>
+  <span class="directive">static</span> <span class="type">class</span> <span class="class">SecurityConfiguration</span> {
+
+    <span class="annotation">@Bean</span>
+    <span class="directive">public</span> SecurityFilterChain securityFilterChain(HttpSecurity http)
+      <span class="directive">throws</span> <span class="exception">Exception</span> {
+
+      http.authorizeHttpRequests((authorize) -&gt; authorize.anyRequest()
+          .authenticated())
+        .httpBasic(<span class="predefined-type">Customizer</span>.withDefaults())
+        .sessionManagement(session -&gt; session.maximumSessions(<span class="integer">1</span>));
+
+      <span class="keyword">return</span> http.build();
+    }
+
+    <span class="annotation">@Bean</span>
+    <span class="annotation">@ConditionalOnMissingBean</span>(UserDetailsService.class)
+    InMemoryUserDetailsManager inMemoryUserDetailsManager() {
+      <span class="keyword">return</span> <span class="keyword">new</span> InMemoryUserDetailsManager(
+        User.withUsername(<span class="string"><span class="delimiter">&quot;</span><span class="content">user</span><span class="delimiter">&quot;</span></span>).password(<span class="string"><span class="delimiter">&quot;</span><span class="content">{noop}user</span><span class="delimiter">&quot;</span></span>).build());
+    }
+  }
+}</code></pre>
+</div>
+</div>
+<details>
+<summary class="title">build.gradle.kts</summary>
+<div class="content">
+<div class="listingblock">
+<div class="content">
+<pre class="CodeRay highlight"><code data-lang="kotlin">import org.springframework.boot.gradle.plugin.SpringBootPlugin
+
+plugins {
+  id(&quot;java&quot;)
+  id(&quot;org.springframework.boot&quot;) version &quot;3.3.1&quot;
+}
+
+repositories {
+  mavenCentral()
+}
+
+dependencies {
+  implementation(platform(SpringBootPlugin.BOM_COORDINATES))
+  implementation(&quot;org.springframework.boot:spring-boot-starter-web&quot;)
+  implementation(&quot;org.springframework.boot:spring-boot-starter-security&quot;)
+
+  //Used for analysis
+  implementation(&quot;com.google.guava:guava:33.2.1-jre&quot;)
+}</code></pre>
+</div>
+</div>
+</div>
+</details>
+</div>
+<div class="sect2">
+<h3 id="_reproducing_the_issue">Reproducing the issue</h3>
+<div class="paragraph">
+<p>Let&#8217;s build the application and execute it with a very restricted memory size to see the issue without having to wait for too long.</p>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre class="CodeRay highlight"><code data-lang="console">gradle build
+java -Xms24m -Xmx24m -jar build/libs/blog.jar</code></pre>
+</div>
+</div>
+<div class="paragraph">
+<p>In a different shell let&#8217;s call the handler thousands of times.</p>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre class="CodeRay highlight"><code data-lang="console">podman run --rm docker.io/library/httpd ab -n 100000 -c 8 -H &quot;Authorization: Basic dXNlcjp1c2Vy&quot; http://host.containers.internal:8080/hello</code></pre>
+</div>
+</div>
+<div class="paragraph">
+<p>Not too long after starting <code>ab</code> there will be out of memory errors from the java process, eg.</p>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre>java.lang.OutOfMemoryError: Java heap space
+	at java.base/java.util.ArrayList.&lt;init&gt;(ArrayList.java:156) ~[na:na]</pre>
+</div>
+</div>
+<div class="paragraph">
+<p>The stack traces itself do not point to the problem because these errors can occur everywhere where the jvm wants to allocate some object and does not have the space for it.</p>
+</div>
+</div>
+<div class="sect2">
+<h3 id="_inspecting_the_heap">Inspecting the heap</h3>
+<div class="paragraph">
+<p>There is a bunch of <a href="https://docs.oracle.com/en/java/javase/21/troubleshoot/diagnostic-tools.html">Diagnostic Tools</a> coming with the OpenJDK.
+Of particular interest for this case is <code>jps</code> and <code>jmap</code>. <code>jps</code> show all running jvm processes on a host and <code>jmap</code> makes it possible to print histograms of a running jvm process.</p>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre>jps
+
+127390 blog.jar</pre>
+</div>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre class="CodeRay highlight"><code>jmap -histo 127390 <b class="conum">(1)</b>
+
+ num     #instances         #bytes  class name (module)
+-------------------------------------------------------
+   1:         73224        5957752  [B (java.base@21.0.2) <b class="conum">(2)</b>
+   2:          1177        1883216  Ljdk.internal.vm.FillerArray; (java.base@21.0.2) <b class="conum">(3)</b>
+   3:         67033        1608792  java.lang.String (java.base@21.0.2) <b class="conum">(4)</b>
+   4:          7771         923232  java.lang.Class (java.base@21.0.2)
+... (shortened output)
+3329:             1             16  sun.util.resources.LocaleData$LocaleDataStrategy (java.base@21.0.2)
+3330:             1             16  sun.util.resources.cldr.provider.CLDRLocaleDataMetaInfo (jdk.localedata@21.0.2)
+Total        392629       20479096</code></pre>
+</div>
+</div>
+<div class="colist arabic">
+<ol>
+<li>
+<p>The pid has to be adapted to the one output by jps.</p>
+</li>
+<li>
+<p><code>[B</code> is the short hand for a byte array.</p>
+</li>
+<li>
+<p>The syntax <code>L&lt;classname&gt;;</code> is the jvm code for an array of class <code>&lt;classname&gt;</code>.</p>
+</li>
+<li>
+<p>The last part is the module name which is optional and not available for classes that are not in modules.</p>
+</li>
+</ol>
+</div>
+<div class="paragraph">
+<p><code>jmap</code> is cheap if <strong>not</strong> used with <code>-histo:live</code> and can be executed on a regular basis to capture the histograms for later analysis.
+For the leaky example app I use a shell snippet that captures the histograms repeatedly and then rerun the test from above.
+The app has to be restarted before if it did not crash yet, because otherwise the memory of the app would already be filled and the histogram would not show any changes.</p>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre class="CodeRay highlight"><code data-lang="bash">while true;
+  do jmap -histo 458980 &gt; &quot;tmp/$(date -Iseconds)&quot;; <b class="conum">(1)</b>
+  sleep 10;
+done</code></pre>
+</div>
+</div>
+<div class="colist arabic">
+<ol>
+<li>
+<p>I used the ISO 8601 format here because there is a predefined date parser in java</p>
+</li>
+</ol>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre>ls -rt1 tmp/
+
+2024-07-09T17:12:46+02:00
+2024-07-09T17:12:56+02:00
+2024-07-09T17:13:07+02:00
+2024-07-09T17:13:17+02:00
+2024-07-09T17:13:28+02:00
+2024-07-09T17:13:38+02:00
+2024-07-09T17:13:49+02:00
+2024-07-09T17:13:59+02:00
+2024-07-09T17:14:10+02:00
+2024-07-09T17:14:21+02:00
+...</pre>
+</div>
+</div>
+<div class="paragraph">
+<p>With this information we can look at the instance count development for every class over time, eg. for <code>ArrayList</code> s.</p>
+</div>
+<div class="imageblock svg">
+<div class="content">
+<img src="/assets/Arraylist_seesaw-DY55Dewl.svg" alt="Arraylist seesaw">
+</div>
+</div>
+<div class="paragraph">
+<p>This is a quite normal view of such a plot.
+The number of instances inside the heap goes up because new objects are created in the code.
+It rises until the jvm decides that is is time to do a garbage collection and remove all the objects that are not used any more.
+The number of objects drops.
+And the cycle repeats.
+At around 700 seconds after start the garbage collection starts to kick in earlier and earlier.
+This is most likely due to the increasing memory pressure because other objects are never freed.</p>
+</div>
+<div class="paragraph">
+<p>Theoretically one could plot the graphs for all classes and take a look at them, to see in which the curve tends to go up.
+In practice that is not feasible because even the small example app has over 3000 classes and real applications easily have tens of thousands.</p>
+</div>
+</div>
+<div class="sect2">
+<h3 id="_linear_regression">Linear regression</h3>
+<div class="paragraph">
+<p>I need something to analyze the collected histograms and decide for every class whether there was an upward trend in instance counts for the class.</p>
+</div>
+<div class="paragraph">
+<p>This can be done with linear regression. For every class the plot of the instance counts is approximated by a line that is drawn through all of the points in a way that the error is minimal.</p>
+</div>
+<div class="paragraph">
+<p>When plotted with the example data from above it is clear that the slope is negative and therefore
+<code>ArrayList</code> s are not the instances I am looking for.</p>
+</div>
+<div class="imageblock svg">
+<div class="content">
+<img src="/assets/Arraylist_seesaw_with_lr-DepLHrVB.svg" alt="Arraylist seesaw with lr">
+</div>
+</div>
+</div>
+<div class="sect2">
+<h3 id="_calculating_the_slope_with_guava">Calculating the slope with Guava</h3>
+<div class="paragraph">
+<p>Drawing all the graphs is still not feasible so I wrote a small program that calculates the slope of the approximated line and sorts them in descending order. <a href="https://github.com/google/guava">Guava</a> contains a <code>PairedStatsAccumulator</code> which is able to calculate it for a set of points.</p>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre class="CodeRay highlight"><code data-lang="java"><span class="keyword">package</span> <span class="namespace">io.github.fp7</span>;
+
+<span class="keyword">import</span> <span class="include">com.google.common.math.PairedStatsAccumulator</span>;
+
+<span class="keyword">import</span> <span class="include">java.io.IOException</span>;
+<span class="keyword">import</span> <span class="include">java.nio.file.Files</span>;
+<span class="keyword">import</span> <span class="include">java.nio.file.Path</span>;
+<span class="keyword">import</span> <span class="include">java.time.OffsetDateTime</span>;
+<span class="keyword">import</span> <span class="include">java.time.format.DateTimeFormatter</span>;
+<span class="keyword">import</span> <span class="include">java.util</span>.*;
+<span class="keyword">import</span> <span class="include">java.util.regex.Pattern</span>;
+<span class="keyword">import</span> <span class="include">java.util.stream.Collectors</span>;
+
+<span class="directive">public</span> <span class="type">class</span> <span class="class">LeakFinder</span> {
+
+  <span class="directive">public</span> <span class="directive">static</span> <span class="type">void</span> main(<span class="predefined-type">String</span><span class="type">[]</span> args) {
+    <span class="keyword">if</span> (args.length != <span class="integer">1</span>) {
+      <span class="predefined-type">System</span>.out.println(<span class="string"><span class="delimiter">&quot;</span><span class="content">Pass the basepath of the histogram files as argument.</span><span class="delimiter">&quot;</span></span>);
+      <span class="predefined-type">System</span>.exit(<span class="integer">1</span>);
+    }
+
+    <span class="type">var</span> histogramDirectory = Path.of(args[<span class="integer">0</span>]);
+    <span class="keyword">if</span> (!Files.isDirectory(histogramDirectory)) {
+      <span class="predefined-type">System</span>.out.println(<span class="string"><span class="delimiter">&quot;</span><span class="content">The passed basePath is not a directory</span><span class="delimiter">&quot;</span></span>);
+      <span class="predefined-type">System</span>.exit(<span class="integer">1</span>);
+      <span class="keyword">throw</span> <span class="keyword">new</span> <span class="exception">IllegalArgumentException</span>(
+        <span class="predefined-type">String</span>.format(<span class="string"><span class="delimiter">&quot;</span><span class="content">%s is not a directory</span><span class="delimiter">&quot;</span></span>, histogramDirectory));
+    }
+
+    <span class="predefined-type">Map</span>&lt;<span class="predefined-type">String</span>, PairedStatsAccumulator&gt; linearRegressionPerClass =
+      fillPairedStatsPerClass(histogramDirectory);
+
+    SequencedMap&lt;<span class="predefined-type">String</span>, <span class="predefined-type">Double</span>&gt; slopePerClass =
+      sortLinearRegressionBySlope(linearRegressionPerClass);
+
+    slopePerClass.entrySet().stream()
+      .takeWhile(e -&gt; e.getValue() &gt; <span class="integer">1</span>)
+      .limit(<span class="integer">20</span>)
+      .forEach((e) -&gt;
+        <span class="predefined-type">System</span>.out.println(<span class="string"><span class="delimiter">&quot;</span><span class="content">%s: %f</span><span class="delimiter">&quot;</span></span>.formatted(e.getKey(), e.getValue())));
+  }
+
+  <span class="directive">private</span> <span class="directive">static</span> SequencedMap&lt;<span class="predefined-type">String</span>, <span class="predefined-type">Double</span>&gt; sortLinearRegressionBySlope(
+    <span class="predefined-type">Map</span>&lt;<span class="predefined-type">String</span>, PairedStatsAccumulator&gt; linearRegressionPerClass) {
+    <span class="type">var</span> slopePerClass =
+      linearRegressionPerClass.entrySet().stream()
+        .filter(e -&gt; e.getValue().count() &gt; <span class="integer">1</span>)
+        .collect(
+          Collectors.toMap(
+            e -&gt; e.getKey(),
+            e -&gt; {
+              <span class="keyword">return</span> e.getValue().leastSquaresFit().slope();
+            }));
+
+    <span class="keyword">return</span> slopePerClass.entrySet().stream()
+      .sorted(<span class="predefined-type">Map</span>.Entry.&lt;<span class="predefined-type">String</span>, <span class="predefined-type">Double</span>&gt;comparingByValue().reversed())
+      .collect(
+        Collectors.toMap(
+          e -&gt; e.getKey(),
+          e -&gt; e.getValue(),
+          (d1, d2) -&gt; {
+            <span class="keyword">throw</span> <span class="keyword">new</span> <span class="exception">IllegalStateException</span>(
+              <span class="string"><span class="delimiter">&quot;</span><span class="content">There should not be two values for the same key</span><span class="delimiter">&quot;</span></span>);
+          },
+          <span class="predefined-type">LinkedHashMap</span>::<span class="keyword">new</span>));
+  }
+
+  <span class="directive">private</span> <span class="directive">static</span> <span class="predefined-type">Map</span>&lt;<span class="predefined-type">String</span>, PairedStatsAccumulator&gt; fillPairedStatsPerClass(
+    Path histogramDirectory) {
+    <span class="type">var</span> parser = <span class="keyword">new</span> HistogramParser();
+
+    <span class="predefined-type">Map</span>&lt;<span class="predefined-type">String</span>, PairedStatsAccumulator&gt; linearRegressionPerClass =
+      <span class="keyword">new</span> <span class="predefined-type">HashMap</span>&lt;&gt;();
+    <span class="keyword">try</span> (<span class="type">var</span> files = Files.list(histogramDirectory)) {
+      files.forEach(
+        f -&gt; {
+          <span class="type">var</span> captureTime =
+            OffsetDateTime.parse(
+              f.getFileName().toString(),
+              DateTimeFormatter.ISO_OFFSET_DATE_TIME);
+          parser
+            .parse(f)
+            .forEach(
+              classStatLine -&gt;
+                linearRegressionPerClass
+                  .computeIfAbsent(
+                    classStatLine.name(), __ -&gt; <span class="keyword">new</span> PairedStatsAccumulator())
+                  .add(captureTime.toInstant().getEpochSecond(),
+                    classStatLine.count()));
+        });
+    } <span class="keyword">catch</span> (<span class="exception">IOException</span> e) {
+      <span class="keyword">throw</span> <span class="keyword">new</span> <span class="exception">RuntimeException</span>(e);
+    }
+    <span class="keyword">return</span> linearRegressionPerClass;
+  }
+
+  <span class="directive">public</span> <span class="directive">static</span> <span class="type">class</span> <span class="class">HistogramParser</span> {
+
+    <span class="directive">private</span> <span class="directive">static</span> <span class="directive">final</span> <span class="predefined-type">Pattern</span> CLASS_STATS_LINE =
+      <span class="predefined-type">Pattern</span>.compile(
+        <span class="string"><span class="delimiter">&quot;</span><span class="char">\\</span><span class="content">s*(?&lt;linenum&gt;</span><span class="char">\\</span><span class="content">d+):</span><span class="char">\\</span><span class="content">s+(?&lt;count&gt;</span><span class="char">\\</span><span class="content">d+)</span><span class="char">\\</span><span class="content">s+(?&lt;bytes&gt;</span><span class="char">\\</span><span class="content">d+)</span><span class="char">\\</span><span class="content">s+(?&lt;name&gt;[^ ]+)(</span><span class="char">\\</span><span class="content">s+</span><span class="char">\\</span><span class="content">([^)]+</span><span class="char">\\</span><span class="content">))?</span><span class="delimiter">&quot;</span></span>);
+
+    <span class="directive">public</span> record ClassStatLine(<span class="type">int</span> linenum, <span class="type">int</span> count, <span class="type">int</span> bytes,
+                                <span class="predefined-type">String</span> name) {
+    }
+
+    <span class="predefined-type">List</span>&lt;ClassStatLine&gt; parse(Path file) {
+      <span class="keyword">try</span> (<span class="type">var</span> lines = Files.lines(file)) {
+        <span class="keyword">return</span> lines
+          .map(
+            line -&gt; {
+              <span class="type">var</span> matcher = CLASS_STATS_LINE.matcher(line);
+              <span class="keyword">if</span> (matcher.matches()) {
+                <span class="keyword">return</span> <span class="keyword">new</span> ClassStatLine(
+                  <span class="predefined-type">Integer</span>.parseInt(matcher.group(<span class="string"><span class="delimiter">&quot;</span><span class="content">linenum</span><span class="delimiter">&quot;</span></span>)),
+                  <span class="predefined-type">Integer</span>.parseInt(matcher.group(<span class="string"><span class="delimiter">&quot;</span><span class="content">count</span><span class="delimiter">&quot;</span></span>)),
+                  <span class="predefined-type">Integer</span>.parseInt(matcher.group(<span class="string"><span class="delimiter">&quot;</span><span class="content">bytes</span><span class="delimiter">&quot;</span></span>)),
+                  matcher.group(<span class="string"><span class="delimiter">&quot;</span><span class="content">name</span><span class="delimiter">&quot;</span></span>));
+              }
+
+              <span class="keyword">return</span> <span class="predefined-constant">null</span>;
+            })
+          .filter(Objects::nonNull)
+          .toList();
+      } <span class="keyword">catch</span> (<span class="exception">IOException</span> e) {
+        <span class="keyword">throw</span> <span class="keyword">new</span> <span class="exception">RuntimeException</span>(e);
+      }
+    }
+  }
+}</code></pre>
+</div>
+</div>
+<div class="paragraph">
+<p>After building and executing it, it outputs all the slopes which are larger then a hard coded threshold.</p>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre class="CodeRay highlight"><code>gradle build
+java -cp build/libs/blog.jar &#92;
+  -Dloader.main=io.github.fp7.LeakFinder &#92;
+  org.springframework.boot.loader.launch.PropertiesLauncher &#92;<b class="conum">(1)</b>
+  tmp/</code></pre>
+</div>
+</div>
+<div class="colist arabic">
+<ol>
+<li>
+<p>This uses the <code>PropertiesLauncher</code> of spring boot to start the <code>LeakFinder</code>
+with all dependencies loaded from inside the fat jar.</p>
+</li>
+</ol>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre class="CodeRay highlight"><code>java.util.Date: 40.129787
+org.springframework.security.core.userdetails.User: 40.129065
+org.springframework.security.core.userdetails.User$AuthorityComparator: 40.129065
+java.util.Collections$UnmodifiableSet: 40.119727
+java.util.TreeMap$KeySet: 40.075521
+java.util.TreeSet: 40.074460
+java.util.TreeMap: 40.019681
+org.springframework.security.core.session.SessionInformation: 39.902295
+java.lang.String: 34.992767
+java.util.concurrent.ConcurrentHashMap$Node: 33.254681
+[B: 33.252322</code></pre>
+</div>
+</div>
+<div class="paragraph">
+<p>Now I have a small amount of candidate classes with a slope between 33 and 40 which means there are that much more instances of the respective class <em>per second</em> over the time the histograms where captured.</p>
+</div>
+</div>
+<div class="sect2">
+<h3 id="_searching_for_the_problem_class">Searching for the "problem" class</h3>
+<div class="paragraph">
+<p>When looking into the candidates and there are <em>multiple classes</em> with a similar slope, I usually start with the non jdk classes.
+It is likely that one of them just holds references to the jdk classes and that they therefore can not be released.</p>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre>org.springframework.security.core.userdetails.User: 40.129065
+org.springframework.security.core.userdetails.User$AuthorityComparator: 40.129065
+org.springframework.security.core.session.SessionInformation: 39.902295</pre>
+</div>
+</div>
+<div class="paragraph">
+<p><code>User$AuthorityComparator</code> is an inner class and it is private.
+A quick glance into the <code>User</code> class showed that every user holds a <code>TreeSet</code> with the mentioned comparator wrapped in a <code>java.util.Collections$UnmodifiableSet</code>.
+A <code>TreeSet</code> on its own holds a <code>TreeMap</code>.
+So the instances of the <code>User</code> class account for the comparator instances and for some of the jdk classes listed above.</p>
+</div>
+<div class="paragraph">
+<p><code>User</code> itself is used in a lot of places. I skip it in hope there is a lower hanging fruit.</p>
+</div>
+<div class="paragraph">
+<p><code>SessionInformation</code> 's constructor turns out to be only used from <code>SessionRegistryImpl#registerNewSession</code>
+and "registry" immediately sounds like a class that holds things.
+And indeed it has a field <code>sessionIds</code> which stores <code>SessionInformation</code>.</p>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre class="CodeRay highlight"><code data-lang="java"><span class="directive">public</span> <span class="type">class</span> <span class="class">SessionRegistryImpl</span> <span class="directive">implements</span> SessionRegistry, ApplicationListener&lt;AbstractSessionEvent&gt; {
+  <span class="directive">private</span> <span class="directive">final</span> <span class="predefined-type">Map</span>&lt;<span class="predefined-type">String</span>, SessionInformation&gt; sessionIds = <span class="keyword">new</span> <span class="predefined-type">ConcurrentHashMap</span>&lt;&gt;();
+
+  <span class="annotation">@Override</span>
+  <span class="directive">public</span> <span class="type">void</span> registerNewSession(<span class="predefined-type">String</span> sessionId, <span class="predefined-type">Object</span> principal) {
+    <span class="comment">// ...</span>
+    <span class="local-variable">this</span>.sessionIds.put(sessionId, <span class="keyword">new</span> SessionInformation(principal, sessionId, <span class="keyword">new</span> <span class="predefined-type">Date</span>()));
+    <span class="comment">// ...</span>
+  }
+}</code></pre>
+</div>
+</div>
+<div class="paragraph">
+<p>The fields of a <code>SessionInformation</code> object are:</p>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre class="CodeRay highlight"><code data-lang="java"><span class="directive">private</span> <span class="predefined-type">Date</span> lastRequest;
+<span class="directive">private</span> <span class="directive">final</span> <span class="predefined-type">Object</span> principal;
+<span class="directive">private</span> <span class="directive">final</span> <span class="predefined-type">String</span> sessionId;
+<span class="directive">private</span> <span class="type">boolean</span> expired = <span class="predefined-constant">false</span>;</code></pre>
+</div>
+</div>
+<div class="paragraph">
+<p>A set breakpoint in the constructor and a debug run later I know that the <code>prinicipal</code> is of type <code>User</code>
+in this case.</p>
+</div>
+<div class="paragraph">
+<p>It seems likely that this is the class that holds everything else that showed when analyzing the histograms.
+The thing left to do is find out why the instances are not released.</p>
+</div>
+<div class="paragraph">
+<p>Next I would look further into  <code>SessionRegistryImpl</code> and specifically for the line(s) where the entries from the <code>sessionIds</code> map are removed.
+But as it happened I saw this in the javadoc first.</p>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre class="CodeRay highlight"><code data-lang="java"><span class="comment">/**
+ * ...
+ * For this class to function correctly in a web application,
+ * <mark>it is important that you register an HttpSessionEventPublisher in
+ * the web.xml</mark> file so that this class is notified of sessions that expire.
+ * ...
+ */</span></code></pre>
+</div>
+</div>
+<div class="paragraph">
+<p>The presence of the class can be checked with the help of the captured histograms once again and a <code>grep -r HttpSessionEventPublisher tmp/</code>. It is indeed
+missing.</p>
+</div>
+<div class="paragraph">
+<p>So there needs to be one configured and the <a href="https://docs.spring.io/spring-security/reference/servlet/authentication/session-management.html#ns-concurrent-sessions">spring security docs</a> mention it prominently.</p>
+</div>
+<div class="imageblock">
+<div class="content">
+<img src="/assets/session-control-BVmiHne9.png" alt="session control">
+</div>
+</div>
+<div class="paragraph">
+<p>I am not sure when this leak was introduced in the original application but one possibility might be when <code>http.sessionManagement(session &#8594; session.maximumSessions(1))</code> was added to limit the concurrent sessions. Spring security then deploys the session registry to be able to check for concurrent sessions of a user. Without the limitation the session registry might not even be used.</p>
+</div>
+<div class="paragraph">
+<p>And finally after adding the bean, the memory leak was gone and repeating the test run passes without
+<code>OutOfMemoryError</code> s. I hope this helps you when you need to find a memory leak yourself.</p>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre class="CodeRay highlight"><code data-lang="java"><span class="annotation">@Bean</span>
+<span class="directive">public</span> HttpSessionEventPublisher httpSessionEventPublisher() {
+  <span class="keyword">return</span> <span class="keyword">new</span> HttpSessionEventPublisher();
+}</code></pre>
+</div>
+</div>
+<div class="paragraph date">
+<p>(2024-07-11)</p>
+</div>
+</div>
+</div>
+</div>
+</div>
+</body>
+</html>
